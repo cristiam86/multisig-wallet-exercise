@@ -1,6 +1,13 @@
 pragma solidity ^0.5.0;
 
 contract MultiSignatureWallet {
+    address[] public owners;
+    uint public required;
+    mapping (address => bool) public isOwner;
+
+    uint public transactionCount;
+    mapping (uint => Transaction) public transactions;
+    mapping (uint => mapping (address => bool)) public confirmations;
 
     struct Transaction {
       bool executed;
@@ -10,15 +17,23 @@ contract MultiSignatureWallet {
     }
 
     event Deposit(address indexed sender, uint value);
+    event Submission(uint indexed transactionId);
+    event Confirmation(address indexed sender, uint indexed transactionId);
+    event ConfirmationRevoked(address indexed sender, uint indexed transactionId);
+    event Execution(uint indexed transactionId);
+    event ExecutionFailure(uint indexed transactionId);
 
     /// @dev Fallback function allows to deposit ether.
-    function()
-    	external
-        payable
-    {
+    function() external payable {
         if (msg.value > 0) {
-            Deposit(msg.sender, msg.value);
-	}
+            emit Deposit(msg.sender, msg.value);
+	    }
+    }
+
+    modifier validRequirement(uint ownerCount, uint _required) {
+        if (_required > ownerCount || _required == 0 || ownerCount == 0)
+            revert('required must be greater than owners');
+        _;
     }
 
     /*
@@ -27,26 +42,65 @@ contract MultiSignatureWallet {
     /// @dev Contract constructor sets initial owners and required number of confirmations.
     /// @param _owners List of initial owners.
     /// @param _required Number of required confirmations.
-    constructor(address[] memory _owners, uint _required) public {}
+    constructor(address[] memory _owners, uint _required) public validRequirement(_owners.length, _required) {
+        for (uint i = 0 ; i<_owners.length ; i++) {
+            isOwner[_owners[i]] = true;
+        }
+        owners = _owners;
+        required = _required;
+    }
 
     /// @dev Allows an owner to submit and confirm a transaction.
     /// @param destination Transaction target address.
     /// @param value Transaction ether value.
     /// @param data Transaction data payload.
     /// @return Returns transaction ID.
-    function submitTransaction(address destination, uint value, bytes memory data) public returns (uint transactionId) {}
+    function submitTransaction(address destination, uint value, bytes memory data)
+        public
+        returns (uint transactionId)
+    {
+        require(isOwner[msg.sender], 'sender is not contract owner');
+        transactionId = addTransaction(destination, value, data);
+        confirmTransaction(transactionId);
+    }
 
     /// @dev Allows an owner to confirm a transaction.
     /// @param transactionId Transaction ID.
-    function confirmTransaction(uint transactionId) public {}
+    function confirmTransaction(uint transactionId) public {
+        require(isOwner[msg.sender], 'sender is not contract owner');
+        require(transactions[transactionId].destination != address(0), 'not valid transaction');
+        require(confirmations[transactionId][msg.sender] == false, 'sender has already confirmed the transaction');
+        confirmations[transactionId][msg.sender] = true;
+        emit Confirmation(msg.sender, transactionId);
+        executeTransaction(transactionId);
+    }
 
     /// @dev Allows an owner to revoke a confirmation for a transaction.
     /// @param transactionId Transaction ID.
-    function revokeConfirmation(uint transactionId) public {}
+    function revokeConfirmation(uint transactionId) public {
+        require(isOwner[msg.sender], 'sender is not contract owner');
+        require(transactions[transactionId].destination != address(0), 'not valid transaction');
+        require(confirmations[transactionId][msg.sender] == true, 'sender hasnt confirmed the transaction');
+        confirmations[transactionId][msg.sender] = false;
+        emit ConfirmationRevoked(msg.sender, transactionId);
+    }
 
     /// @dev Allows anyone to execute a confirmed transaction.
     /// @param transactionId Transaction ID.
-    function executeTransaction(uint transactionId) public {}
+    function executeTransaction(uint transactionId) public {
+        require(transactions[transactionId].executed == false, 'transaction has been executed previously');
+        if (isConfirmed(transactionId)) {
+            Transaction storage t = transactions[transactionId];
+            t.executed = true;
+            (bool success, bytes memory returnedData) = t.destination.call.value(t.value)(t.data);
+            if (success)
+                emit Execution(transactionId);
+            else {
+                emit ExecutionFailure(transactionId);
+                t.executed = false;
+            }
+        }
+    }
 
 		/*
 		 * (Possible) Helper Functions
@@ -54,12 +108,33 @@ contract MultiSignatureWallet {
     /// @dev Returns the confirmation status of a transaction.
     /// @param transactionId Transaction ID.
     /// @return Confirmation status.
-    function isConfirmed(uint transactionId) internal view returns (bool) {}
+    function isConfirmed(uint transactionId) internal view returns (bool) {
+        uint count = 0;
+        for (uint i = 0 ; i<owners.length ; i++) {
+            if (confirmations[transactionId][owners[i]])
+                count += 1;
+            if (count == required)
+                return true;
+        }
+    }
 
     /// @dev Adds a new transaction to the transaction mapping, if transaction does not exist yet.
     /// @param destination Transaction target address.
     /// @param value Transaction ether value.
     /// @param data Transaction data payload.
     /// @return Returns transaction ID.
-    function addTransaction(address destination, uint value, bytes memory data) internal returns (uint transactionId) {}
+    function addTransaction(address destination, uint value, bytes memory data)
+        internal
+        returns (uint transactionId)
+    {
+        transactionId = transactionCount;
+        transactions[transactionId] = Transaction({
+            destination: destination,
+            value: value,
+            data: data,
+            executed: false
+        });
+        transactionCount += 1;
+        emit Submission(transactionId);
+    }
 }
